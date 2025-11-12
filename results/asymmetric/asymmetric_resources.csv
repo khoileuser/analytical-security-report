@@ -1,0 +1,5 @@
+algorithm,key_size_bits,avg_cpu_time_ms,avg_memory_mb,peak_memory_mb,iterations
+RSA-2048,2048,44.5328,0.0859,0.0859,20
+RSA-3072,3072,89.8438,0.0078,0.0078,20
+ECC-256,256,0.01,0.0,0,20
+ECC-384,384,0.01,0.0,0,20

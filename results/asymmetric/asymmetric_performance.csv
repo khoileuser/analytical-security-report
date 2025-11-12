@@ -1,0 +1,7 @@
+algorithm,avg_ciphertext_bytes,avg_dec_time_ms,avg_enc_time_ms,avg_gen_time_ms,avg_key_export_bytes,iterations,key_size_bits,message_size_bytes,std_dev_ms
+RSA-2048,,,,31.44,1704.0,20,2048,,16.16
+RSA-3072,,,,106.16,2484.0,20,3072,,66.54
+ECC-256,,,,0.02,241.0,20,256,,0.02
+ECC-384,,,,0.6,306.0,20,384,,0.03
+RSA-2048,256.0,0.1804,0.0438,,,20,2048,57,
+RSA-3072,384.0,0.4968,0.0439,,,20,3072,57,

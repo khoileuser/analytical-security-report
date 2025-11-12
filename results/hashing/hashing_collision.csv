@@ -1,0 +1,8 @@
+algorithm,output_bits,avalanche_char_diff,avalanche_diff_percentage,is_deterministic,hash_output_length
+MD5,128,31,96.88,Yes,32
+SHA1,160,38,95.0,Yes,40
+SHA256,256,59,92.19,Yes,64
+SHA512,512,121,94.53,Yes,128
+SHA3_256,256,62,96.88,Yes,64
+SHA3_512,512,122,95.31,Yes,128
+BLAKE2B,512,120,93.75,Yes,128

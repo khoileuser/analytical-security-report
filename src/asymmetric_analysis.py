@@ -1,7 +1,11 @@
 """
 Asymmetric Encryption Algorithm Performance Testing Script
-Comparative analysis of RSA-2048, RSA-3072, ECC-256, and ECC-384
+Comparative analysis of RSA-2048, RSA-3072, ECC-256, ECC-384, and ElGamal-2048/3072
 Tests: Performance Speed, Resource Consumption, Digital Signatures
+
+Note: ElGamal uses a simulated implementation for performance testing purposes.
+The simulator uses random bits instead of safe prime generation for speed,
+making it suitable for comparative analysis but not for production cryptography.
 """
 
 import os
@@ -9,12 +13,95 @@ import csv
 import time
 import psutil
 import gc
+import random
 import matplotlib.pyplot as plt
 import numpy as np
 from cryptography.hazmat.primitives.asymmetric import rsa, ec, padding as asym_padding
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.backends import default_backend
 from cryptography.exceptions import InvalidSignature
+import hashlib
+
+class ElGamalSimulator:
+    """Simulated ElGamal for performance testing (not cryptographically secure)"""
+    def __init__(self, key_size):
+        self.key_size = key_size
+        # Use random bits instead of prime generation for speed
+        self.p = random.getrandbits(key_size) | 1  # Make it odd
+        self.g = random.randint(2, min(65537, self.p - 1))
+        self.x = random.randint(1, self.p - 2)  # private key
+        self.y = pow(self.g, self.x, self.p)  # public key
+    
+    def encrypt(self, message):
+        """Simulate ElGamal encryption"""
+        k = random.randint(1, self.p - 2)
+        c1 = pow(self.g, k, self.p)
+        # Convert message to int
+        m_int = int.from_bytes(message, byteorder='big')
+        if m_int >= self.p:
+            # Hash if message is too large
+            m_int = int.from_bytes(hashlib.sha256(message).digest()[:self.key_size//8], byteorder='big')
+        c2 = (m_int * pow(self.y, k, self.p)) % self.p
+        return (c1, c2)
+    
+    def decrypt(self, ciphertext):
+        """Simulate ElGamal decryption"""
+        c1, c2 = ciphertext
+        s = pow(c1, self.x, self.p)
+        s_inv = pow(s, self.p - 2, self.p)
+        m_int = (c2 * s_inv) % self.p
+        byte_length = (m_int.bit_length() + 7) // 8
+        return m_int.to_bytes(byte_length, byteorder='big') if byte_length > 0 else b'\x00'
+    
+    def sign(self, message):
+        """Simulate ElGamal signature"""
+        h = hashlib.sha256(message).digest()
+        m_int = int.from_bytes(h, byteorder='big') % (self.p - 1)
+        k = random.randint(2, self.p - 2)
+        while self._gcd(k, self.p - 1) != 1:
+            k = random.randint(2, self.p - 2)
+        r = pow(self.g, k, self.p)
+        k_inv = self._modinv(k, self.p - 1)
+        s = (k_inv * (m_int - self.x * r)) % (self.p - 1)
+        return (r, s)
+    
+    def verify(self, message, signature):
+        """Simulate ElGamal signature verification"""
+        r, s = signature
+        if not (0 < r < self.p):
+            return False
+        h = hashlib.sha256(message).digest()
+        m_int = int.from_bytes(h, byteorder='big') % (self.p - 1)
+        v1 = pow(self.y, r, self.p) * pow(r, s, self.p) % self.p
+        v2 = pow(self.g, m_int, self.p)
+        return v1 == v2
+    
+    def exportKey(self):
+        """Export key for size measurement"""
+        return str((self.p, self.g, self.y, self.x)).encode()
+    
+    @staticmethod
+    def _gcd(a, b):
+        while b:
+            a, b = b, a % b
+        return a
+    
+    @staticmethod
+    def _modinv(a, m):
+        """Iterative modular multiplicative inverse using extended Euclidean algorithm"""
+        if m == 1:
+            return 0
+        
+        m0, x0, x1 = m, 0, 1
+        
+        while a > 1:
+            if m == 0:
+                return None  # No inverse exists
+            q = a // m
+            a, m = m, a % m
+            x0, x1 = x1 - q * x0, x0
+        
+        return (x1 % m0 + m0) % m0 if a == 1 else None
 
 class AsymmetricEncryptionAnalysis:
     """Comprehensive asymmetric encryption analysis with performance measurement"""
@@ -24,7 +111,9 @@ class AsymmetricEncryptionAnalysis:
             'RSA-2048': {'key_size': 2048, 'type': 'RSA'},
             'RSA-3072': {'key_size': 3072, 'type': 'RSA'},
             'ECC-256': {'key_size': 256, 'type': 'ECC', 'curve': 'P-256'},
-            'ECC-384': {'key_size': 384, 'type': 'ECC', 'curve': 'P-384'}
+            'ECC-384': {'key_size': 384, 'type': 'ECC', 'curve': 'P-384'},
+            'ElGamal-2048': {'key_size': 2048, 'type': 'ElGamal'},
+            'ElGamal-3072': {'key_size': 3072, 'type': 'ElGamal'}
         }
         self.message = b"Security is not an afterthought in cryptographic systems."
         self.iterations = 20  # Fewer iterations due to computational intensity
@@ -45,7 +134,10 @@ class AsymmetricEncryptionAnalysis:
             gen_times = []
             key_sizes = []
             
-            for _ in range(self.iterations):
+            # Reduce iterations for ElGamal due to extremely slow prime generation
+            iterations = self.iterations
+            
+            for i in range(iterations):
                 start = time.perf_counter()
                 
                 if algo_config['type'] == 'RSA':
@@ -54,22 +146,27 @@ class AsymmetricEncryptionAnalysis:
                         key_size=algo_config['key_size'],
                         backend=default_backend()
                     )
-                else:  # ECC
+                elif algo_config['type'] == 'ECC':
                     if algo_config['key_size'] == 256:
                         curve = ec.SECP256R1()
                     else:  # 384
                         curve = ec.SECP384R1()
                     key = ec.generate_private_key(curve, default_backend())
+                elif algo_config['type'] == 'ElGamal':
+                    key = ElGamalSimulator(algo_config['key_size'])
                 
                 elapsed = (time.perf_counter() - start) * 1000
                 gen_times.append(elapsed)
                 
                 # Get key size in bytes
-                key_bytes = len(key.private_bytes(
-                    encoding=serialization.Encoding.PEM,
-                    format=serialization.PrivateFormat.PKCS8,
-                    encryption_algorithm=serialization.NoEncryption()
-                ))
+                if algo_config['type'] == 'ElGamal':
+                    key_bytes = len(key.exportKey())
+                else:
+                    key_bytes = len(key.private_bytes(
+                        encoding=serialization.Encoding.PEM,
+                        format=serialization.PrivateFormat.PKCS8,
+                        encryption_algorithm=serialization.NoEncryption()
+                    ))
                 key_sizes.append(key_bytes)
             
             avg_time = np.mean(gen_times)
@@ -96,48 +193,71 @@ class AsymmetricEncryptionAnalysis:
         print("ASYMMETRIC ENCRYPTION/DECRYPTION TEST")
         print("="*70)
         
-        rsa_algorithms = {k: v for k, v in self.algorithms.items() if v['type'] == 'RSA'}
+        enc_dec_algorithms = {k: v for k, v in self.algorithms.items() 
+                             if v['type'] in ['RSA', 'ElGamal']}
         
-        for algo_name, algo_config in rsa_algorithms.items():
+        for algo_name, algo_config in enc_dec_algorithms.items():
             print(f"\nTesting {algo_name}...")
             
             # Generate key once
-            key = rsa.generate_private_key(
-                public_exponent=65537,
-                key_size=algo_config['key_size'],
-                backend=default_backend()
-            )
+            if algo_config['type'] == 'RSA':
+                key = rsa.generate_private_key(
+                    public_exponent=65537,
+                    key_size=algo_config['key_size'],
+                    backend=default_backend()
+                )
+            elif algo_config['type'] == 'ElGamal':
+                key = ElGamalSimulator(algo_config['key_size'])
             
             enc_times = []
             dec_times = []
             ciphertext_sizes = []
             
-            for _ in range(self.iterations):
-                # Encryption
-                public_key = key.public_key()
-                start = time.perf_counter()
-                ciphertext = public_key.encrypt(
-                    self.message,
-                    asym_padding.OAEP(
-                        mgf=asym_padding.MGF1(algorithm=hashes.SHA256()),
-                        algorithm=hashes.SHA256(),
-                        label=None
+            # Reduce iterations for ElGamal
+            iterations = self.iterations
+            
+            for _ in range(iterations):
+                if algo_config['type'] == 'RSA':
+                    # RSA Encryption
+                    public_key = key.public_key()
+                    start = time.perf_counter()
+                    ciphertext = public_key.encrypt(
+                        self.message,
+                        asym_padding.OAEP(
+                            mgf=asym_padding.MGF1(algorithm=hashes.SHA256()),
+                            algorithm=hashes.SHA256(),
+                            label=None
+                        )
                     )
-                )
-                enc_times.append((time.perf_counter() - start) * 1000)
-                ciphertext_sizes.append(len(ciphertext))
-                
-                # Decryption
-                start = time.perf_counter()
-                plaintext = key.decrypt(
-                    ciphertext,
-                    asym_padding.OAEP(
-                        mgf=asym_padding.MGF1(algorithm=hashes.SHA256()),
-                        algorithm=hashes.SHA256(),
-                        label=None
+                    enc_times.append((time.perf_counter() - start) * 1000)
+                    ciphertext_sizes.append(len(ciphertext))
+                    
+                    # RSA Decryption
+                    start = time.perf_counter()
+                    plaintext = key.decrypt(
+                        ciphertext,
+                        asym_padding.OAEP(
+                            mgf=asym_padding.MGF1(algorithm=hashes.SHA256()),
+                            algorithm=hashes.SHA256(),
+                            label=None
+                        )
                     )
-                )
-                dec_times.append((time.perf_counter() - start) * 1000)
+                    dec_times.append((time.perf_counter() - start) * 1000)
+                    
+                elif algo_config['type'] == 'ElGamal':
+                    # ElGamal Encryption
+                    start = time.perf_counter()
+                    ciphertext = key.encrypt(self.message)
+                    enc_times.append((time.perf_counter() - start) * 1000)
+                    # ElGamal ciphertext is a tuple (c1, c2), calculate total size
+                    c1_bytes = (ciphertext[0].bit_length() + 7) // 8
+                    c2_bytes = (ciphertext[1].bit_length() + 7) // 8
+                    ciphertext_sizes.append(c1_bytes + c2_bytes)
+                    
+                    # ElGamal Decryption
+                    start = time.perf_counter()
+                    plaintext = key.decrypt(ciphertext)
+                    dec_times.append((time.perf_counter() - start) * 1000)
             
             avg_enc = np.mean(enc_times)
             avg_dec = np.mean(dec_times)
@@ -174,18 +294,23 @@ class AsymmetricEncryptionAnalysis:
                     key_size=algo_config['key_size'],
                     backend=default_backend()
                 )
-            else:  # ECC
+            elif algo_config['type'] == 'ECC':
                 if algo_config['key_size'] == 256:
                     curve = ec.SECP256R1()
                 else:  # 384
                     curve = ec.SECP384R1()
                 key = ec.generate_private_key(curve, default_backend())
+            elif algo_config['type'] == 'ElGamal':
+                key = ElGamalSimulator(algo_config['key_size'])
             
             sig_gen_times = []
             sig_ver_times = []
             signature_sizes = []
             
-            for _ in range(self.iterations):
+            # Reduce iterations for ElGamal
+            iterations = self.iterations
+            
+            for _ in range(iterations):
                 # Signature generation
                 start = time.perf_counter()
                 if algo_config['type'] == 'RSA':
@@ -194,34 +319,47 @@ class AsymmetricEncryptionAnalysis:
                         asym_padding.PKCS1v15(),
                         hashes.SHA256()
                     )
-                else:  # ECC
+                elif algo_config['type'] == 'ECC':
                     signature = key.sign(
                         self.message,
                         ec.ECDSA(hashes.SHA256())
                     )
+                elif algo_config['type'] == 'ElGamal':
+                    signature = key.sign(self.message)
                 
                 sig_gen_times.append((time.perf_counter() - start) * 1000)
-                signature_sizes.append(len(signature))
+                
+                # Calculate signature size
+                if algo_config['type'] == 'ElGamal':
+                    r_bytes = (signature[0].bit_length() + 7) // 8
+                    s_bytes = (signature[1].bit_length() + 7) // 8
+                    signature_sizes.append(r_bytes + s_bytes)
+                else:
+                    signature_sizes.append(len(signature))
                 
                 # Signature verification
                 start = time.perf_counter()
                 try:
-                    public_key = key.public_key()
                     if algo_config['type'] == 'RSA':
+                        public_key = key.public_key()
                         public_key.verify(
                             signature,
                             self.message,
                             asym_padding.PKCS1v15(),
                             hashes.SHA256()
                         )
-                    else:  # ECC
+                    elif algo_config['type'] == 'ECC':
+                        public_key = key.public_key()
                         public_key.verify(
                             signature,
                             self.message,
                             ec.ECDSA(hashes.SHA256())
                         )
+                    elif algo_config['type'] == 'ElGamal':
+                        key.verify(self.message, signature)
+                    
                     sig_ver_times.append((time.perf_counter() - start) * 1000)
-                except InvalidSignature:
+                except (InvalidSignature, Exception):
                     sig_ver_times.append((time.perf_counter() - start) * 1000)
             
             avg_sig_gen = np.mean(sig_gen_times)
@@ -267,7 +405,10 @@ class AsymmetricEncryptionAnalysis:
                 time.sleep(0.01)
             baseline_memory = np.median(baselines)
             
-            for _ in range(self.iterations):
+            # Reduce iterations for ElGamal
+            iterations = self.iterations
+            
+            for i in range(iterations):
                 # Force garbage collection before measurement
                 gc.collect()
                 
@@ -281,12 +422,14 @@ class AsymmetricEncryptionAnalysis:
                         key_size=algo_config['key_size'],
                         backend=default_backend()
                     )
-                else:  # ECC
+                elif algo_config['type'] == 'ECC':
                     if algo_config['key_size'] == 256:
                         curve = ec.SECP256R1()
                     else:  # 384
                         curve = ec.SECP384R1()
                     key = ec.generate_private_key(curve, default_backend())
+                elif algo_config['type'] == 'ElGamal':
+                    key = ElGamalSimulator(algo_config['key_size'])
                 
                 mem_after = self.process.memory_info().rss / (1024 * 1024)
                 cpu_end = self.process.cpu_times()

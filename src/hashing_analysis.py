@@ -10,6 +10,7 @@ import csv
 import time
 import psutil
 import gc
+import sys
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -73,66 +74,76 @@ class HashingPerformanceAnalysis:
         print("RESOURCE CONSUMPTION TEST")
         print("="*70)
         
-        test_data = self.generate_test_data(10*1024*1024)  # 10MB test data
+        # Use larger test data to amplify memory differences
+        test_data_size = 100 * 1024 * 1024  # 100MB test data
+        test_data = self.generate_test_data(test_data_size)
         
         for algo in self.algorithms:
             print(f"\nTesting {algo.upper()}...")
             cpu_times = []
-            memory_usage = []
-            
-            # Force garbage collection and establish baseline
-            gc.collect()
-            time.sleep(0.1)  # Let things settle
-            
-            # Take multiple baseline measurements
-            baselines = []
-            for _ in range(5):
-                baselines.append(self.process.memory_info().rss / (1024 * 1024))
-                time.sleep(0.01)
-            baseline_memory = np.median(baselines)
+            hash_object_sizes = []
+            digest_sizes = []
+            total_object_sizes = []
             
             for _ in range(self.iterations):
                 # Force garbage collection before measurement
                 gc.collect()
                 
                 cpu_start = self.process.cpu_times()
-                mem_before = self.process.memory_info().rss / (1024 * 1024)
+                
+                # Create hash object and measure its size
+                h = hashlib.new(algo)
+                hash_obj_size = sys.getsizeof(h) / 1024  # Convert to KB
                 
                 # Perform hashing
-                h = hashlib.new(algo)
                 h.update(test_data)
-                digest = h.hexdigest()
                 
-                mem_after = self.process.memory_info().rss / (1024 * 1024)
+                # Measure hash object size after update (may have internal buffers)
+                hash_obj_size_after = sys.getsizeof(h) / 1024  # Convert to KB
+                
+                # Generate digests
+                digest = h.digest()
+                digest_hex = h.hexdigest()
+                
+                # Measure digest sizes
+                digest_size = (sys.getsizeof(digest) + sys.getsizeof(digest_hex)) / 1024  # KB
+                
+                # Calculate total memory used by all hash-related objects
+                total_size = hash_obj_size_after + digest_size
+                
                 cpu_end = self.process.cpu_times()
                 
                 cpu_time = (cpu_end.user - cpu_start.user) * 1000  # Convert to ms
-                # Use the difference from baseline instead of just before/after
-                memory_delta = max(0, mem_after - baseline_memory)
                 
                 cpu_times.append(cpu_time if cpu_time > 0 else 0.01)
-                memory_usage.append(memory_delta)
+                hash_object_sizes.append(hash_obj_size_after)
+                digest_sizes.append(digest_size)
+                total_object_sizes.append(total_size)
                 
                 # Clean up for next iteration
-                del h, digest
+                del h, digest, digest_hex
             
             avg_cpu = np.mean(cpu_times)
-            avg_memory = np.mean(memory_usage)
-            peak_memory = np.max(memory_usage)
+            avg_hash_obj_size = np.mean(hash_object_sizes)
+            avg_digest_size = np.mean(digest_sizes)
+            avg_total_size = np.mean(total_object_sizes)
+            peak_total_size = np.max(total_object_sizes)
             
             result = {
                 'algorithm': algo.upper(),
-                'data_size_mb': test_data.__sizeof__() / (1024 * 1024),
+                'data_size_mb': test_data_size / (1024 * 1024),
                 'avg_cpu_time_ms': round(avg_cpu, 4),
-                'avg_memory_mb': round(avg_memory, 4),
-                'peak_memory_mb': round(peak_memory, 4),
+                'avg_memory_mb': round(avg_total_size / 1024, 4),  # Convert KB to MB
+                'peak_memory_mb': round(peak_total_size / 1024, 4),  # Convert KB to MB
                 'iterations': self.iterations
             }
             
             self.resource_results.append(result)
             print(f"  CPU Time: {avg_cpu:.4f}ms | "
-                  f"Avg Memory: {avg_memory:.4f}MB | "
-                  f"Peak Memory: {peak_memory:.4f}MB")
+                  f"Hash Object: {avg_hash_obj_size:.4f}KB | "
+                  f"Digest: {avg_digest_size:.4f}KB | "
+                  f"Total Memory: {avg_total_size:.4f}KB | "
+                  f"Peak: {peak_total_size:.4f}KB")
     
     def test_collision_resistance(self):
         """Test avalanche effect and collision resistance"""
@@ -334,7 +345,7 @@ class HashingPerformanceAnalysis:
         axes[0, 1].set_ylabel('Memory (MB)', fontweight='bold')
         axes[0, 1].set_title('Memory Consumption Analysis')
         axes[0, 1].set_xticks(x)
-        axes[0, 1].set_xticklabels(df['algorithm'])
+        axes[0, 1].set_xticklabels(df['algorithm'], rotation=45, ha='right')
         axes[0, 1].legend()
         axes[0, 1].grid(True, alpha=0.3, axis='y')
         
@@ -346,13 +357,17 @@ class HashingPerformanceAnalysis:
         axes[1, 0].set_title('CPU Time Ranking (Higher = Slower)')
         axes[1, 0].grid(True, alpha=0.3, axis='x')
         
-        # Plot 4: Memory efficiency (ratio)
-        df['memory_efficiency'] = df['peak_memory_mb'] / (df['avg_memory_mb'] + 0.001)
-        axes[1, 1].bar(df['algorithm'], df['memory_efficiency'], color='mediumseagreen', 
+        # Plot 4: Object memory footprint
+        axes[1, 1].bar(df['algorithm'], df['avg_memory_mb'] * 1024, color='mediumseagreen', 
                       edgecolor='darkgreen', linewidth=1.5)
-        axes[1, 1].set_ylabel('Peak/Avg Memory Ratio', fontweight='bold')
-        axes[1, 1].set_title('Memory Efficiency Ratio')
+        axes[1, 1].set_ylabel('Memory Footprint (KB)', fontweight='bold')
+        axes[1, 1].set_title('Hash Object + Digest Memory Footprint')
+        axes[1, 1].set_xticklabels(df['algorithm'], rotation=45, ha='right')
         axes[1, 1].grid(True, alpha=0.3, axis='y')
+        
+        for i, v in enumerate(df['avg_memory_mb'].values * 1024):
+            axes[1, 1].text(i, v + max(df['avg_memory_mb'] * 1024)*0.02, f'{v:.2f}', 
+                           ha='center', fontweight='bold', fontsize=8)
         
         plt.tight_layout()
         plt.savefig(filename, dpi=300, bbox_inches='tight')

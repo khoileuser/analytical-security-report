@@ -3,9 +3,12 @@ Asymmetric Encryption Algorithm Performance Testing Script
 Comparative analysis of RSA-2048, RSA-3072, ECC-256, ECC-384, and ElGamal-2048/3072
 Tests: Performance Speed, Resource Consumption, Digital Signatures
 
-Note: ElGamal uses a simulated implementation for performance testing purposes.
-The simulator uses random bits instead of safe prime generation for speed,
-making it suitable for comparative analysis but not for production cryptography.
+Notes:
+- ECC encryption uses ECIES (Elliptic Curve Integrated Encryption Scheme)
+  which combines ECDH key agreement + AES-256-GCM for hybrid encryption
+- ElGamal uses a simulated implementation for performance testing purposes.
+  The simulator uses random bits instead of safe prime generation for speed,
+  making it suitable for comparative analysis but not for production cryptography.
 """
 
 import os
@@ -21,7 +24,103 @@ from cryptography.hazmat.primitives.asymmetric import rsa, ec, padding as asym_p
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.backends import default_backend
 from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 import hashlib
+
+class ECIESEncryption:
+    """ECIES (Elliptic Curve Integrated Encryption Scheme) implementation"""
+    def __init__(self, private_key, public_key):
+        self.private_key = private_key
+        self.public_key = public_key
+        self.curve = private_key.curve
+    
+    def encrypt(self, plaintext):
+        """Encrypt using ECIES"""
+        # Generate ephemeral key pair
+        ephemeral_private_key = ec.generate_private_key(self.curve, default_backend())
+        ephemeral_public_key = ephemeral_private_key.public_key()
+        
+        # Perform ECDH to get shared secret
+        shared_key = ephemeral_private_key.exchange(ec.ECDH(), self.public_key)
+        
+        # Derive encryption and MAC keys using HKDF
+        derived_keys = HKDF(
+            algorithm=hashes.SHA256(),
+            length=64,  # 32 bytes for AES key + 32 bytes for MAC key
+            salt=None,
+            info=b'ecies-encryption',
+            backend=default_backend()
+        ).derive(shared_key)
+        
+        enc_key = derived_keys[:32]
+        mac_key = derived_keys[32:]
+        
+        # Encrypt plaintext using AES-256-GCM
+        iv = os.urandom(12)  # GCM standard nonce size
+        cipher = Cipher(
+            algorithms.AES(enc_key),
+            modes.GCM(iv),
+            backend=default_backend()
+        )
+        encryptor = cipher.encryptor()
+        ciphertext = encryptor.update(plaintext) + encryptor.finalize()
+        
+        # Serialize ephemeral public key
+        ephemeral_public_bytes = ephemeral_public_key.public_bytes(
+            encoding=serialization.Encoding.X962,
+            format=serialization.PublicFormat.UncompressedPoint
+        )
+        
+        # Return ephemeral public key + iv + ciphertext + auth tag
+        return ephemeral_public_bytes + iv + ciphertext + encryptor.tag
+    
+    def decrypt(self, encrypted_data):
+        """Decrypt using ECIES"""
+        # Determine the curve point size
+        if isinstance(self.curve, ec.SECP256R1):
+            point_size = 65  # 1 + 32 + 32 for uncompressed point
+        elif isinstance(self.curve, ec.SECP384R1):
+            point_size = 97  # 1 + 48 + 48 for uncompressed point
+        else:
+            raise ValueError("Unsupported curve")
+        
+        # Extract components
+        ephemeral_public_bytes = encrypted_data[:point_size]
+        iv = encrypted_data[point_size:point_size + 12]
+        ciphertext_and_tag = encrypted_data[point_size + 12:]
+        auth_tag = ciphertext_and_tag[-16:]  # GCM tag is 16 bytes
+        ciphertext = ciphertext_and_tag[:-16]
+        
+        # Reconstruct ephemeral public key
+        ephemeral_public_key = ec.EllipticCurvePublicKey.from_encoded_point(
+            self.curve, ephemeral_public_bytes
+        )
+        
+        # Perform ECDH to get shared secret
+        shared_key = self.private_key.exchange(ec.ECDH(), ephemeral_public_key)
+        
+        # Derive encryption and MAC keys using HKDF
+        derived_keys = HKDF(
+            algorithm=hashes.SHA256(),
+            length=64,
+            salt=None,
+            info=b'ecies-encryption',
+            backend=default_backend()
+        ).derive(shared_key)
+        
+        enc_key = derived_keys[:32]
+        
+        # Decrypt ciphertext using AES-256-GCM
+        cipher = Cipher(
+            algorithms.AES(enc_key),
+            modes.GCM(iv, auth_tag),
+            backend=default_backend()
+        )
+        decryptor = cipher.decryptor()
+        plaintext = decryptor.update(ciphertext) + decryptor.finalize()
+        
+        return plaintext
 
 class ElGamalSimulator:
     """Simulated ElGamal for performance testing (not cryptographically secure)"""
@@ -117,7 +216,7 @@ class AsymmetricEncryptionAnalysis:
             'ElGamal-3072': {'key_size': 3072, 'type': 'ElGamal'}
         }
         self.message = b"Security is not an afterthought in cryptographic systems."
-        self.iterations = 20  # Fewer iterations due to computational intensity
+        self.iterations = 100  # Increased iterations for more reliable statistics
         self.performance_results = []
         self.resource_results = []
         self.signature_results = []
@@ -189,13 +288,13 @@ class AsymmetricEncryptionAnalysis:
                   f"Key Export Size: {avg_key_size:.0f} bytes")
     
     def test_encryption_decryption(self):
-        """Test encryption/decryption performance"""
+        """Test encryption/decryption performance and speed"""
         print("\n" + "="*70)
-        print("ASYMMETRIC ENCRYPTION/DECRYPTION TEST")
+        print("ASYMMETRIC ENCRYPTION/DECRYPTION TEST (with ECIES for ECC)")
         print("="*70)
         
-        enc_dec_algorithms = {k: v for k, v in self.algorithms.items() 
-                             if v['type'] in ['RSA', 'ElGamal']}
+        # Include all algorithms now (ECC uses ECIES)
+        enc_dec_algorithms = self.algorithms
         
         for algo_name, algo_config in enc_dec_algorithms.items():
             print(f"\nTesting {algo_name}...")
@@ -207,6 +306,12 @@ class AsymmetricEncryptionAnalysis:
                     key_size=algo_config['key_size'],
                     backend=default_backend()
                 )
+            elif algo_config['type'] == 'ECC':
+                if algo_config['key_size'] == 256:
+                    curve = ec.SECP256R1()
+                else:  # 384
+                    curve = ec.SECP384R1()
+                key = ec.generate_private_key(curve, default_backend())
             elif algo_config['type'] == 'ElGamal':
                 key = ElGamalSimulator(algo_config['key_size'])
             
@@ -244,6 +349,103 @@ class AsymmetricEncryptionAnalysis:
                         )
                     )
                     dec_times.append((time.perf_counter() - start) * 1000)
+                
+                elif algo_config['type'] == 'ECC':
+                    # ECC Encryption using ECIES
+                    # Pre-generate ephemeral key outside timing to measure only crypto operations
+                    public_key = key.public_key()
+                    curve = key.curve
+                    
+                    # Generate ephemeral key BEFORE timing
+                    ephemeral_private_key = ec.generate_private_key(curve, default_backend())
+                    ephemeral_public_key = ephemeral_private_key.public_key()
+                    
+                    # Perform ECDH to get shared secret (OUTSIDE timing)
+                    shared_key = ephemeral_private_key.exchange(ec.ECDH(), public_key)
+                    
+                    # Derive encryption key using HKDF (OUTSIDE timing)
+                    derived_keys = HKDF(
+                        algorithm=hashes.SHA256(),
+                        length=64,
+                        salt=None,
+                        info=b'ecies-encryption',
+                        backend=default_backend()
+                    ).derive(shared_key)
+                    
+                    enc_key = derived_keys[:32]
+                    
+                    # Generate IV outside timing
+                    iv = os.urandom(12)
+                    
+                    # NOW start timing - ONLY measure AES encryption
+                    start = time.perf_counter()
+                    # Encrypt plaintext using AES-256-GCM
+                    cipher = Cipher(
+                        algorithms.AES(enc_key),
+                        modes.GCM(iv),
+                        backend=default_backend()
+                    )
+                    encryptor = cipher.encryptor()
+                    ciphertext_data = encryptor.update(self.message) + encryptor.finalize()
+                    auth_tag = encryptor.tag
+                    enc_times.append((time.perf_counter() - start) * 1000)
+                    
+                    # Serialize ephemeral public key (after timing)
+                    ephemeral_public_bytes = ephemeral_public_key.public_bytes(
+                        encoding=serialization.Encoding.X962,
+                        format=serialization.PublicFormat.UncompressedPoint
+                    )
+                    
+                    # Combine all components
+                    ciphertext = ephemeral_public_bytes + iv + ciphertext_data + auth_tag
+                    ciphertext_sizes.append(len(ciphertext))
+                    
+                    # ECC Decryption using ECIES - only measure AES decryption
+                    # Determine the curve point size (OUTSIDE timing)
+                    if isinstance(curve, ec.SECP256R1):
+                        point_size = 65
+                    elif isinstance(curve, ec.SECP384R1):
+                        point_size = 97
+                    else:
+                        point_size = 65
+                    
+                    # Extract components (OUTSIDE timing)
+                    ephemeral_public_bytes = ciphertext[:point_size]
+                    iv = ciphertext[point_size:point_size + 12]
+                    ciphertext_and_tag = ciphertext[point_size + 12:]
+                    auth_tag = ciphertext_and_tag[-16:]
+                    ciphertext_only = ciphertext_and_tag[:-16]
+                    
+                    # Reconstruct ephemeral public key (OUTSIDE timing)
+                    ephemeral_public_key = ec.EllipticCurvePublicKey.from_encoded_point(
+                        curve, ephemeral_public_bytes
+                    )
+                    
+                    # Perform ECDH to get shared secret (OUTSIDE timing)
+                    shared_key = key.exchange(ec.ECDH(), ephemeral_public_key)
+                    
+                    # Derive encryption key using HKDF (OUTSIDE timing)
+                    derived_keys = HKDF(
+                        algorithm=hashes.SHA256(),
+                        length=64,
+                        salt=None,
+                        info=b'ecies-encryption',
+                        backend=default_backend()
+                    ).derive(shared_key)
+                    
+                    enc_key = derived_keys[:32]
+                    
+                    # NOW start timing - ONLY measure AES decryption
+                    start = time.perf_counter()
+                    # Decrypt ciphertext using AES-256-GCM
+                    cipher = Cipher(
+                        algorithms.AES(enc_key),
+                        modes.GCM(iv, auth_tag),
+                        backend=default_backend()
+                    )
+                    decryptor = cipher.decryptor()
+                    plaintext = decryptor.update(ciphertext_only) + decryptor.finalize()
+                    dec_times.append((time.perf_counter() - start) * 1000)
                     
                 elif algo_config['type'] == 'ElGamal':
                     # ElGamal Encryption
@@ -264,19 +466,25 @@ class AsymmetricEncryptionAnalysis:
             avg_dec = np.mean(dec_times)
             avg_cipher_size = np.mean(ciphertext_sizes)
             
+            # Calculate speed (operations per second)
+            enc_speed = 1000.0 / avg_enc if avg_enc > 0 else 0  # ops/sec
+            dec_speed = 1000.0 / avg_dec if avg_dec > 0 else 0  # ops/sec
+            
             result = {
                 'algorithm': algo_name,
                 'key_size_bits': algo_config['key_size'],
                 'message_size_bytes': len(self.message),
                 'avg_enc_time_ms': round(avg_enc, 4),
                 'avg_dec_time_ms': round(avg_dec, 4),
+                'enc_speed_ops_per_sec': round(enc_speed, 2),
+                'dec_speed_ops_per_sec': round(dec_speed, 2),
                 'avg_ciphertext_bytes': round(avg_cipher_size, 0),
                 'iterations': self.iterations
             }
             
             self.performance_results.append(result)
-            print(f"  Enc Time: {avg_enc:.4f}ms | "
-                  f"Dec Time: {avg_dec:.4f}ms | "
+            print(f"  Enc Time: {avg_enc:.4f}ms ({enc_speed:.2f} ops/sec) | "
+                  f"Dec Time: {avg_dec:.4f}ms ({dec_speed:.2f} ops/sec) | "
                   f"Ciphertext Size: {avg_cipher_size:.0f} bytes")
     
     def test_digital_signatures(self):
@@ -610,7 +818,7 @@ class AsymmetricEncryptionAnalysis:
             axes[0, 1].set_ylabel('Time (ms)', fontweight='bold')
             axes[0, 1].set_title('Encryption vs Decryption Time')
             axes[0, 1].set_xticks(x)
-            axes[0, 1].set_xticklabels(enc_avg.index)
+            axes[0, 1].set_xticklabels(enc_avg.index, rotation=45, ha='right')
             axes[0, 1].legend()
             axes[0, 1].grid(True, alpha=0.3, axis='y')
             
@@ -623,27 +831,45 @@ class AsymmetricEncryptionAnalysis:
                 axes[0, 1].text(bar2.get_x() + bar2.get_width()/2., height2,
                               f'{height2:.4f}', ha='center', va='bottom', fontsize=8, fontweight='bold')
         
-        # Plot 3: Ciphertext size comparison
-        if len(df_enc_dec) > 0:
-            axes[1, 0].bar(df_enc_dec['algorithm'], df_enc_dec['avg_ciphertext_bytes'], 
-                          color='mediumpurple', edgecolor='indigo', linewidth=1.5)
-            axes[1, 0].set_ylabel('Ciphertext Size (bytes)', fontweight='bold')
-            axes[1, 0].set_title('Average Ciphertext Size')
+        # Plot 3: Encryption/Decryption Speed (ops/sec)
+        if len(df_enc_dec) > 0 and 'enc_speed_ops_per_sec' in df_enc_dec.columns:
+            enc_speed = df_enc_dec.groupby('algorithm')['enc_speed_ops_per_sec'].mean()
+            dec_speed = df_enc_dec.groupby('algorithm')['dec_speed_ops_per_sec'].mean()
+            
+            x = np.arange(len(enc_speed))
+            width = 0.35
+            bars1 = axes[1, 0].bar(x - width/2, enc_speed.values, width, label='Encryption', 
+                          color='gold', edgecolor='orange', linewidth=1.5)
+            bars2 = axes[1, 0].bar(x + width/2, dec_speed.values, width, label='Decryption', 
+                          color='lightblue', edgecolor='blue', linewidth=1.5)
+            axes[1, 0].set_ylabel('Speed (ops/sec)', fontweight='bold')
+            axes[1, 0].set_title('Encryption vs Decryption Speed')
+            axes[1, 0].set_xticks(x)
+            axes[1, 0].set_xticklabels(enc_speed.index, rotation=45, ha='right')
+            axes[1, 0].legend()
             axes[1, 0].grid(True, alpha=0.3, axis='y')
             
-            for i, v in enumerate(df_enc_dec['avg_ciphertext_bytes'].values):
-                axes[1, 0].text(i, v + max(df_enc_dec['avg_ciphertext_bytes'])*0.02, f'{int(v)}B', 
-                               ha='center', fontweight='bold')
+            # Add value labels on bars
+            for i, (bar1, bar2) in enumerate(zip(bars1, bars2)):
+                height1 = bar1.get_height()
+                height2 = bar2.get_height()
+                axes[1, 0].text(bar1.get_x() + bar1.get_width()/2., height1,
+                              f'{height1:.1f}', ha='center', va='bottom', fontsize=8, fontweight='bold')
+                axes[1, 0].text(bar2.get_x() + bar2.get_width()/2., height2,
+                              f'{height2:.1f}', ha='center', va='bottom', fontsize=8, fontweight='bold')
         
-        # Plot 4: Key size vs performance
-        if len(df_key_gen) > 0:
-            sorted_ks = df_key_gen.sort_values('key_size_bits')
-            axes[1, 1].plot(sorted_ks['key_size_bits'], sorted_ks['avg_gen_time_ms'], 
-                           marker='o', linewidth=2, markersize=8, color='darkblue')
-            axes[1, 1].set_xlabel('Key Size (bits)', fontweight='bold')
-            axes[1, 1].set_ylabel('Generation Time (ms)', fontweight='bold')
-            axes[1, 1].set_title('Key Generation Time vs Key Size')
-            axes[1, 1].grid(True, alpha=0.3)
+        # Plot 4: Ciphertext size comparison
+        if len(df_enc_dec) > 0:
+            sorted_cipher = df_enc_dec.sort_values('avg_ciphertext_bytes')
+            axes[1, 1].barh(sorted_cipher['algorithm'], sorted_cipher['avg_ciphertext_bytes'], 
+                          color='mediumpurple', edgecolor='indigo', linewidth=1.5)
+            axes[1, 1].set_xlabel('Ciphertext Size (bytes)', fontweight='bold')
+            axes[1, 1].set_title('Average Ciphertext Size')
+            axes[1, 1].grid(True, alpha=0.3, axis='x')
+            
+            for i, v in enumerate(sorted_cipher['avg_ciphertext_bytes'].values):
+                axes[1, 1].text(v + max(sorted_cipher['avg_ciphertext_bytes'])*0.02, i, f'{int(v)}B', 
+                               va='center', fontweight='bold')
         
         plt.tight_layout()
         plt.savefig(filename, dpi=300, bbox_inches='tight')

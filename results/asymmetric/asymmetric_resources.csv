@@ -1,7 +1,7 @@
-algorithm,key_size_bits,avg_cpu_time_ms,avg_memory_mb,peak_memory_mb,iterations
-RSA-2048,2048,28.9078,0.1094,0.1094,20
-RSA-3072,3072,97.6562,0.0,0,20
-ECC-256,256,0.01,0.0,0,20
-ECC-384,384,0.7907,0.0,0,20
-ElGamal-2048,2048,16.4062,0.0004,0.0039,20
-ElGamal-3072,3072,38.2812,0.0,0,20
+algorithm,key_size_bits,avg_cpu_time_ms,avg_memory_kb,peak_memory_kb,avg_object_size_kb,iterations
+RSA-2048,2048,21.0958,1.33,4.0,1.19,20
+RSA-3072,3072,87.5,2.06,8.0,1.75,20
+ECC-256,256,0.01,0.13,0.13,0.13,20
+ECC-384,384,0.01,0.18,0.18,0.18,20
+ElGamal-2048,2048,6.256,1.15,4.0,1.0,20
+ElGamal-3072,3072,31.25,1.5,1.5,1.5,20

@@ -13,6 +13,7 @@ import csv
 import time
 import psutil
 import gc
+import sys
 import random
 import matplotlib.pyplot as plt
 import numpy as np
@@ -393,74 +394,122 @@ class AsymmetricEncryptionAnalysis:
             
             cpu_times = []
             memory_usage = []
-            
-            # Force garbage collection and establish baseline
-            gc.collect()
-            time.sleep(0.1)  # Let things settle
-            
-            # Take multiple baseline measurements
-            baselines = []
-            for _ in range(5):
-                baselines.append(self.process.memory_info().rss / (1024 * 1024))
-                time.sleep(0.01)
-            baseline_memory = np.median(baselines)
+            object_sizes = []
             
             # Reduce iterations for ElGamal
             iterations = self.iterations
             
             for i in range(iterations):
-                # Force garbage collection before measurement
+                # Force garbage collection multiple times before measurement
                 gc.collect()
+                gc.collect()
+                time.sleep(0.05)
+                
+                # Get baseline memory in bytes - take multiple samples
+                baseline_samples = []
+                for _ in range(3):
+                    baseline_samples.append(self.process.memory_info().rss)
+                    time.sleep(0.01)
+                mem_baseline = min(baseline_samples)  # Use minimum as baseline
                 
                 cpu_start = self.process.cpu_times()
-                mem_before = self.process.memory_info().rss / (1024 * 1024)
+                mem_samples = []
                 
-                # Perform key generation
+                # Perform key generation and sample memory during operation
                 if algo_config['type'] == 'RSA':
                     key = rsa.generate_private_key(
                         public_exponent=65537,
                         key_size=algo_config['key_size'],
                         backend=default_backend()
                     )
+                    # Sample memory multiple times after generation
+                    for _ in range(5):
+                        mem_samples.append(self.process.memory_info().rss)
+                    
+                    # Measure the serialized key size for object memory
+                    key_bytes = key.private_bytes(
+                        encoding=serialization.Encoding.DER,
+                        format=serialization.PrivateFormat.PKCS8,
+                        encryption_algorithm=serialization.NoEncryption()
+                    )
+                    object_sizes.append(len(key_bytes))
+                    
                 elif algo_config['type'] == 'ECC':
                     if algo_config['key_size'] == 256:
                         curve = ec.SECP256R1()
                     else:  # 384
                         curve = ec.SECP384R1()
                     key = ec.generate_private_key(curve, default_backend())
+                    # Sample memory multiple times after generation
+                    for _ in range(5):
+                        mem_samples.append(self.process.memory_info().rss)
+                    
+                    # Measure the serialized key size for object memory
+                    key_bytes = key.private_bytes(
+                        encoding=serialization.Encoding.DER,
+                        format=serialization.PrivateFormat.PKCS8,
+                        encryption_algorithm=serialization.NoEncryption()
+                    )
+                    object_sizes.append(len(key_bytes))
+                    
                 elif algo_config['type'] == 'ElGamal':
                     key = ElGamalSimulator(algo_config['key_size'])
+                    # Sample memory multiple times after generation
+                    for _ in range(5):
+                        mem_samples.append(self.process.memory_info().rss)
+                    
+                    # Estimate object size for ElGamal (p, g, x, y all ~key_size bits)
+                    estimated_size = (algo_config['key_size'] // 8) * 4  # 4 large integers
+                    object_sizes.append(estimated_size)
                 
-                mem_after = self.process.memory_info().rss / (1024 * 1024)
                 cpu_end = self.process.cpu_times()
                 
                 cpu_time = (cpu_end.user - cpu_start.user) * 1000
-                # Use the difference from baseline instead of just before/after
-                memory_delta = max(0, mem_after - baseline_memory)
+                
+                # Use the maximum memory sample minus baseline
+                if mem_samples:
+                    max_mem = max(mem_samples)
+                    memory_delta_bytes = max(0, max_mem - mem_baseline)
+                else:
+                    memory_delta_bytes = 0
+                
+                # If RSS didn't change, use object size as minimum memory estimate
+                if memory_delta_bytes == 0 and object_sizes:
+                    memory_delta_bytes = object_sizes[-1]  # Use actual object size
+                
+                memory_delta_kb = memory_delta_bytes / 1024.0
                 
                 cpu_times.append(cpu_time if cpu_time > 0 else 0.01)
-                memory_usage.append(memory_delta)
+                memory_usage.append(memory_delta_kb)
                 
-                # Clean up for next iteration
+                # Clean up
                 del key
+                if 'key_bytes' in locals():
+                    del key_bytes
+            
+            # Final cleanup
+            gc.collect()
             
             avg_cpu = np.mean(cpu_times)
-            avg_memory = np.mean(memory_usage)
-            peak_memory = np.max(memory_usage)
+            avg_memory_kb = np.mean(memory_usage)
+            peak_memory_kb = np.max(memory_usage)
+            avg_object_kb = np.mean(object_sizes) / 1024.0
             
             result = {
                 'algorithm': algo_name,
                 'key_size_bits': algo_config['key_size'],
                 'avg_cpu_time_ms': round(avg_cpu, 4),
-                'avg_memory_mb': round(avg_memory, 4),
-                'peak_memory_mb': round(peak_memory, 4),
+                'avg_memory_kb': round(avg_memory_kb, 2),
+                'peak_memory_kb': round(peak_memory_kb, 2),
+                'avg_object_size_kb': round(avg_object_kb, 2),
                 'iterations': self.iterations
             }
             
             self.resource_results.append(result)
             print(f"  CPU Time: {avg_cpu:.4f}ms | "
-                  f"Avg Memory: {avg_memory:.4f}MB | "
-                  f"Peak Memory: {peak_memory:.4f}MB")
+                  f"Avg Memory: {avg_memory_kb:.2f}KB | "
+                  f"Peak Memory: {peak_memory_kb:.2f}KB | "
+                  f"Obj Size: {avg_object_kb:.2f}KB")
     
     def save_performance_to_csv(self, filename='results/asymmetric/asymmetric_performance.csv'):
         """Save performance results to CSV"""
@@ -554,9 +603,9 @@ class AsymmetricEncryptionAnalysis:
             
             x = np.arange(len(enc_avg))
             width = 0.35
-            axes[0, 1].bar(x - width/2, enc_avg.values, width, label='Encryption', 
+            bars1 = axes[0, 1].bar(x - width/2, enc_avg.values, width, label='Encryption', 
                           color='lightcoral', edgecolor='red', linewidth=1.5)
-            axes[0, 1].bar(x + width/2, dec_avg.values, width, label='Decryption', 
+            bars2 = axes[0, 1].bar(x + width/2, dec_avg.values, width, label='Decryption', 
                           color='lightgreen', edgecolor='green', linewidth=1.5)
             axes[0, 1].set_ylabel('Time (ms)', fontweight='bold')
             axes[0, 1].set_title('Encryption vs Decryption Time')
@@ -564,6 +613,15 @@ class AsymmetricEncryptionAnalysis:
             axes[0, 1].set_xticklabels(enc_avg.index)
             axes[0, 1].legend()
             axes[0, 1].grid(True, alpha=0.3, axis='y')
+            
+            # Add value labels on bars
+            for i, (bar1, bar2) in enumerate(zip(bars1, bars2)):
+                height1 = bar1.get_height()
+                height2 = bar2.get_height()
+                axes[0, 1].text(bar1.get_x() + bar1.get_width()/2., height1,
+                              f'{height1:.4f}', ha='center', va='bottom', fontsize=8, fontweight='bold')
+                axes[0, 1].text(bar2.get_x() + bar2.get_width()/2., height2,
+                              f'{height2:.4f}', ha='center', va='bottom', fontsize=8, fontweight='bold')
         
         # Plot 3: Ciphertext size comparison
         if len(df_enc_dec) > 0:
@@ -684,40 +742,80 @@ class AsymmetricEncryptionAnalysis:
         
         # Plot 1: CPU usage comparison
         sorted_cpu = df.sort_values('avg_cpu_time_ms', ascending=False)
-        axes[0, 0].barh(sorted_cpu['algorithm'], sorted_cpu['avg_cpu_time_ms'], 
+        bars_cpu = axes[0, 0].barh(sorted_cpu['algorithm'], sorted_cpu['avg_cpu_time_ms'], 
                        color='lightcoral', edgecolor='red', linewidth=1.5)
         axes[0, 0].set_xlabel('CPU Time (ms)', fontweight='bold')
         axes[0, 0].set_title('Average CPU Time per Algorithm')
         axes[0, 0].grid(True, alpha=0.3, axis='x')
         
+        # Add value labels on CPU bars
+        for i, (bar, val) in enumerate(zip(bars_cpu, sorted_cpu['avg_cpu_time_ms'].values)):
+            axes[0, 0].text(val + max(sorted_cpu['avg_cpu_time_ms'])*0.02, i, f'{val:.2f}', 
+                           va='center', fontsize=9, fontweight='bold')
+        
         # Plot 2: Memory consumption
         x = np.arange(len(df))
         width = 0.35
-        axes[0, 1].bar(x - width/2, df['avg_memory_mb'], width, label='Avg Memory', 
+        bars_avg = axes[0, 1].bar(x - width/2, df['avg_memory_kb'], width, label='Avg Memory', 
                       color='lightblue', edgecolor='blue', linewidth=1.5)
-        axes[0, 1].bar(x + width/2, df['peak_memory_mb'], width, label='Peak Memory', 
+        bars_peak = axes[0, 1].bar(x + width/2, df['peak_memory_kb'], width, label='Peak Memory', 
                       color='lightcoral', edgecolor='red', linewidth=1.5)
-        axes[0, 1].set_ylabel('Memory (MB)', fontweight='bold')
+        axes[0, 1].set_ylabel('Memory (KB)', fontweight='bold')
         axes[0, 1].set_title('Memory Consumption Analysis')
         axes[0, 1].set_xticks(x)
-        axes[0, 1].set_xticklabels(df['algorithm'])
+        axes[0, 1].set_xticklabels(df['algorithm'], rotation=45, ha='right')
         axes[0, 1].legend()
         axes[0, 1].grid(True, alpha=0.3, axis='y')
         
+        # Add value labels on memory bars
+        for bar_avg, bar_peak, val_avg, val_peak in zip(bars_avg, bars_peak, 
+                                                          df['avg_memory_kb'].values, 
+                                                          df['peak_memory_kb'].values):
+            height_avg = bar_avg.get_height()
+            height_peak = bar_peak.get_height()
+            if height_avg > 0:
+                axes[0, 1].text(bar_avg.get_x() + bar_avg.get_width()/2., height_avg,
+                              f'{val_avg:.1f}', ha='center', va='bottom', fontsize=8, fontweight='bold')
+            if height_peak > 0:
+                axes[0, 1].text(bar_peak.get_x() + bar_peak.get_width()/2., height_peak,
+                              f'{val_peak:.1f}', ha='center', va='bottom', fontsize=8, fontweight='bold')
+        
         # Plot 3: CPU time ranking
-        axes[1, 0].bar(df['algorithm'], df['avg_cpu_time_ms'], color='orange', 
+        bars_cpu_rank = axes[1, 0].bar(df['algorithm'], df['avg_cpu_time_ms'], color='orange', 
                       edgecolor='darkorange', linewidth=1.5)
         axes[1, 0].set_ylabel('CPU Time (ms)', fontweight='bold')
         axes[1, 0].set_title('CPU Time Ranking')
+        axes[1, 0].set_xticklabels(df['algorithm'], rotation=45, ha='right')
         axes[1, 0].grid(True, alpha=0.3, axis='y')
         
-        # Plot 4: Memory efficiency
-        df['memory_efficiency'] = df['peak_memory_mb'] / (df['avg_memory_mb'] + 0.001)
-        axes[1, 1].bar(df['algorithm'], df['memory_efficiency'], color='mediumseagreen', 
-                      edgecolor='darkgreen', linewidth=1.5)
-        axes[1, 1].set_ylabel('Peak/Avg Memory Ratio', fontweight='bold')
-        axes[1, 1].set_title('Memory Efficiency Ratio')
-        axes[1, 1].grid(True, alpha=0.3, axis='y')
+        # Add value labels on CPU ranking bars
+        for bar, val in zip(bars_cpu_rank, df['avg_cpu_time_ms'].values):
+            height = bar.get_height()
+            axes[1, 0].text(bar.get_x() + bar.get_width()/2., height,
+                          f'{val:.2f}', ha='center', va='bottom', fontsize=8, fontweight='bold')
+        
+        # Plot 4: Object size comparison
+        if 'avg_object_size_kb' in df.columns:
+            bars_obj = axes[1, 1].bar(df['algorithm'], df['avg_object_size_kb'], color='mediumseagreen', 
+                          edgecolor='darkgreen', linewidth=1.5)
+            axes[1, 1].set_ylabel('Key Object Size (KB)', fontweight='bold')
+            axes[1, 1].set_title('Average Key Object Size')
+            axes[1, 1].set_xticklabels(df['algorithm'], rotation=45, ha='right')
+            axes[1, 1].grid(True, alpha=0.3, axis='y')
+            
+            # Add value labels on object size bars
+            for bar, val in zip(bars_obj, df['avg_object_size_kb'].values):
+                height = bar.get_height()
+                axes[1, 1].text(bar.get_x() + bar.get_width()/2., height,
+                              f'{val:.2f}', ha='center', va='bottom', fontsize=8, fontweight='bold')
+        else:
+            # Fallback to memory efficiency if object size not available
+            df['memory_efficiency'] = df['peak_memory_kb'] / (df['avg_memory_kb'] + 0.1)
+            axes[1, 1].bar(df['algorithm'], df['memory_efficiency'], color='mediumseagreen', 
+                          edgecolor='darkgreen', linewidth=1.5)
+            axes[1, 1].set_ylabel('Peak/Avg Memory Ratio', fontweight='bold')
+            axes[1, 1].set_title('Memory Efficiency Ratio')
+            axes[1, 1].grid(True, alpha=0.3, axis='y')
         
         plt.tight_layout()
         plt.savefig(filename, dpi=300, bbox_inches='tight')

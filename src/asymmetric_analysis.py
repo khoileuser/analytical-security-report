@@ -1,11 +1,15 @@
 """
 Asymmetric Encryption Algorithm Performance Testing Script
 Comparative analysis of RSA-2048, RSA-3072, ECC-256, ECC-384, and ElGamal-2048/3072
-Tests: Performance Speed, Resource Consumption, Digital Signatures
+Tests: Performance Speed, Resource Consumption, Ciphertext Size Analysis
 
 Notes:
-- ECC encryption uses ECIES (Elliptic Curve Integrated Encryption Scheme)
-  which combines ECDH key agreement + AES-256-GCM for hybrid encryption
+- All algorithms use hybrid encryption for ciphertext size analysis:
+  * RSA/ElGamal: Encrypt random AES-256 key, then use AES-GCM for data
+  * ECC: Uses ECIES (Elliptic Curve Integrated Encryption Scheme) which 
+    combines ECDH key agreement + AES-256-GCM for hybrid encryption
+- This reflects real-world usage where asymmetric crypto encrypts keys,
+  and symmetric crypto encrypts the actual data
 - ElGamal uses a simulated implementation for performance testing purposes.
   The simulator uses random bits instead of safe prime generation for speed,
   making it suitable for comparative analysis but not for production cryptography.
@@ -219,7 +223,7 @@ class AsymmetricEncryptionAnalysis:
         self.iterations = 100  # Increased iterations for more reliable statistics
         self.performance_results = []
         self.resource_results = []
-        self.signature_results = []
+        self.ciphertext_results = []
         self.process = psutil.Process(os.getpid())
     
     def test_key_generation(self):
@@ -487,16 +491,20 @@ class AsymmetricEncryptionAnalysis:
                   f"Dec Time: {avg_dec:.4f}ms ({dec_speed:.2f} ops/sec) | "
                   f"Ciphertext Size: {avg_cipher_size:.0f} bytes")
     
-    def test_digital_signatures(self):
-        """Test digital signature generation and verification"""
+    def test_ciphertext_sizes(self):
+        """Test ciphertext size across different message sizes using hybrid encryption"""
         print("\n" + "="*70)
-        print("DIGITAL SIGNATURE GENERATION/VERIFICATION TEST")
+        print("CIPHERTEXT SIZE ANALYSIS ACROSS MESSAGE SIZES")
+        print("(Using Hybrid Encryption: RSA/ElGamal encrypts AES key, AES-GCM encrypts data)")
         print("="*70)
+        
+        # Test with multiple message sizes (in bytes)
+        message_sizes = [16, 32, 64, 128, 256, 512]
         
         for algo_name, algo_config in self.algorithms.items():
             print(f"\nTesting {algo_name}...")
             
-            # Generate key
+            # Generate key once
             if algo_config['type'] == 'RSA':
                 key = rsa.generate_private_key(
                     public_exponent=65537,
@@ -512,84 +520,130 @@ class AsymmetricEncryptionAnalysis:
             elif algo_config['type'] == 'ElGamal':
                 key = ElGamalSimulator(algo_config['key_size'])
             
-            sig_gen_times = []
-            sig_ver_times = []
-            signature_sizes = []
-            
-            # Reduce iterations for ElGamal
-            iterations = self.iterations
-            
-            for _ in range(iterations):
-                # Signature generation
-                start = time.perf_counter()
-                if algo_config['type'] == 'RSA':
-                    signature = key.sign(
-                        self.message,
-                        asym_padding.PKCS1v15(),
-                        hashes.SHA256()
-                    )
-                elif algo_config['type'] == 'ECC':
-                    signature = key.sign(
-                        self.message,
-                        ec.ECDSA(hashes.SHA256())
-                    )
-                elif algo_config['type'] == 'ElGamal':
-                    signature = key.sign(self.message)
+            for msg_size in message_sizes:
+                test_message = os.urandom(msg_size)
+                ciphertext_sizes = []
                 
-                sig_gen_times.append((time.perf_counter() - start) * 1000)
-                
-                # Calculate signature size
-                if algo_config['type'] == 'ElGamal':
-                    r_bytes = (signature[0].bit_length() + 7) // 8
-                    s_bytes = (signature[1].bit_length() + 7) // 8
-                    signature_sizes.append(r_bytes + s_bytes)
-                else:
-                    signature_sizes.append(len(signature))
-                
-                # Signature verification
-                start = time.perf_counter()
-                try:
-                    if algo_config['type'] == 'RSA':
-                        public_key = key.public_key()
-                        public_key.verify(
-                            signature,
-                            self.message,
-                            asym_padding.PKCS1v15(),
-                            hashes.SHA256()
-                        )
-                    elif algo_config['type'] == 'ECC':
-                        public_key = key.public_key()
-                        public_key.verify(
-                            signature,
-                            self.message,
-                            ec.ECDSA(hashes.SHA256())
-                        )
-                    elif algo_config['type'] == 'ElGamal':
-                        key.verify(self.message, signature)
+                # Test 10 times per message size for consistency
+                for _ in range(10):
+                    try:
+                        if algo_config['type'] == 'RSA':
+                            # RSA Hybrid Encryption: Encrypt AES key with RSA, encrypt data with AES
+                            # Generate random AES-256 key
+                            aes_key = os.urandom(32)  # 256-bit AES key
+                            
+                            # Encrypt the AES key with RSA
+                            public_key = key.public_key()
+                            encrypted_aes_key = public_key.encrypt(
+                                aes_key,
+                                asym_padding.OAEP(
+                                    mgf=asym_padding.MGF1(algorithm=hashes.SHA256()),
+                                    algorithm=hashes.SHA256(),
+                                    label=None
+                                )
+                            )
+                            
+                            # Encrypt the actual message with AES-GCM
+                            iv = os.urandom(12)
+                            cipher = Cipher(
+                                algorithms.AES(aes_key),
+                                modes.GCM(iv),
+                                backend=default_backend()
+                            )
+                            encryptor = cipher.encryptor()
+                            aes_ciphertext = encryptor.update(test_message) + encryptor.finalize()
+                            auth_tag = encryptor.tag
+                            
+                            # Total ciphertext: encrypted_aes_key + iv + aes_ciphertext + auth_tag
+                            total_size = len(encrypted_aes_key) + len(iv) + len(aes_ciphertext) + len(auth_tag)
+                            ciphertext_sizes.append(total_size)
+                        
+                        elif algo_config['type'] == 'ECC':
+                            # ECC/ECIES (already uses hybrid encryption internally)
+                            public_key = key.public_key()
+                            curve = key.curve
+                            
+                            # Full ECIES encryption
+                            ephemeral_private_key = ec.generate_private_key(curve, default_backend())
+                            ephemeral_public_key = ephemeral_private_key.public_key()
+                            shared_key = ephemeral_private_key.exchange(ec.ECDH(), public_key)
+                            
+                            derived_keys = HKDF(
+                                algorithm=hashes.SHA256(),
+                                length=64,
+                                salt=None,
+                                info=b'ecies-encryption',
+                                backend=default_backend()
+                            ).derive(shared_key)
+                            
+                            enc_key = derived_keys[:32]
+                            iv = os.urandom(12)
+                            
+                            cipher = Cipher(
+                                algorithms.AES(enc_key),
+                                modes.GCM(iv),
+                                backend=default_backend()
+                            )
+                            encryptor = cipher.encryptor()
+                            ciphertext_data = encryptor.update(test_message) + encryptor.finalize()
+                            auth_tag = encryptor.tag
+                            
+                            ephemeral_public_bytes = ephemeral_public_key.public_bytes(
+                                encoding=serialization.Encoding.X962,
+                                format=serialization.PublicFormat.UncompressedPoint
+                            )
+                            
+                            full_ciphertext = ephemeral_public_bytes + iv + ciphertext_data + auth_tag
+                            ciphertext_sizes.append(len(full_ciphertext))
+                        
+                        elif algo_config['type'] == 'ElGamal':
+                            # ElGamal Hybrid Encryption: Encrypt AES key with ElGamal, encrypt data with AES
+                            # Generate random AES-256 key
+                            aes_key = os.urandom(32)  # 256-bit AES key
+                            
+                            # Encrypt the AES key with ElGamal
+                            encrypted_aes_key = key.encrypt(aes_key)
+                            c1_bytes = (encrypted_aes_key[0].bit_length() + 7) // 8
+                            c2_bytes = (encrypted_aes_key[1].bit_length() + 7) // 8
+                            elgamal_key_size = c1_bytes + c2_bytes
+                            
+                            # Encrypt the actual message with AES-GCM
+                            iv = os.urandom(12)
+                            cipher = Cipher(
+                                algorithms.AES(aes_key),
+                                modes.GCM(iv),
+                                backend=default_backend()
+                            )
+                            encryptor = cipher.encryptor()
+                            aes_ciphertext = encryptor.update(test_message) + encryptor.finalize()
+                            auth_tag = encryptor.tag
+                            
+                            # Total ciphertext: elgamal_encrypted_key + iv + aes_ciphertext + auth_tag
+                            total_size = elgamal_key_size + len(iv) + len(aes_ciphertext) + len(auth_tag)
+                            ciphertext_sizes.append(total_size)
                     
-                    sig_ver_times.append((time.perf_counter() - start) * 1000)
-                except (InvalidSignature, Exception):
-                    sig_ver_times.append((time.perf_counter() - start) * 1000)
-            
-            avg_sig_gen = np.mean(sig_gen_times)
-            avg_sig_ver = np.mean(sig_ver_times)
-            avg_sig_size = np.mean(signature_sizes)
-            
-            result = {
-                'algorithm': algo_name,
-                'key_size_bits': algo_config['key_size'],
-                'message_size_bytes': len(self.message),
-                'avg_sig_gen_ms': round(avg_sig_gen, 4),
-                'avg_sig_ver_ms': round(avg_sig_ver, 4),
-                'avg_signature_bytes': round(avg_sig_size, 0),
-                'gen_ver_ratio': round(avg_sig_gen / avg_sig_ver, 2) if avg_sig_ver > 0 else 0,
-                'iterations': self.iterations
-            }
-            
-            self.signature_results.append(result)
-            print(f"  Sig Gen: {avg_sig_gen:.4f}ms | "
-                  f"Sig Ver: {avg_sig_ver:.4f}ms | "
-                  f"Signature Size: {avg_sig_size:.0f} bytes")
+                    except Exception as e:
+                        # Skip if encryption fails for this message size
+                        continue
+                
+                if ciphertext_sizes:
+                    avg_cipher_size = np.mean(ciphertext_sizes)
+                    expansion_ratio = avg_cipher_size / msg_size if msg_size > 0 else 0
+                    overhead = avg_cipher_size - msg_size
+                    
+                    result = {
+                        'algorithm': algo_name,
+                        'key_size_bits': algo_config['key_size'],
+                        'message_size_bytes': msg_size,
+                        'avg_ciphertext_bytes': round(avg_cipher_size, 2),
+                        'expansion_ratio': round(expansion_ratio, 2),
+                        'overhead_bytes': round(overhead, 2),
+                        'samples': len(ciphertext_sizes)
+                    }
+                    
+                    self.ciphertext_results.append(result)
+                    print(f"  Msg: {msg_size}B -> Cipher: {avg_cipher_size:.0f}B | "
+                          f"Ratio: {expansion_ratio:.2f}x | Overhead: {overhead:.0f}B")
     
     def test_resource_consumption(self):
         """Test CPU and memory consumption"""
@@ -765,22 +819,22 @@ class AsymmetricEncryptionAnalysis:
         print(f"\n✓ Performance results saved to '{filename}'")
 
     
-    def save_signature_to_csv(self, filename='results/asymmetric/asymmetric_signatures.csv'):
-        """Save signature results to CSV"""
-        if not self.signature_results:
-            print("No signature data to save")
+    def save_ciphertext_to_csv(self, filename='results/asymmetric/asymmetric_ciphertext.csv'):
+        """Save ciphertext size results to CSV"""
+        if not self.ciphertext_results:
+            print("No ciphertext data to save")
             return
         
         # Create results directory if it doesn't exist
         os.makedirs('results/asymmetric', exist_ok=True)
         
-        keys = self.signature_results[0].keys()
+        keys = self.ciphertext_results[0].keys()
         with open(filename, 'w', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=keys)
             writer.writeheader()
-            writer.writerows(self.signature_results)
+            writer.writerows(self.ciphertext_results)
         
-        print(f"✓ Signature results saved to '{filename}'")
+        print(f"✓ Ciphertext size results saved to '{filename}'")
     
     def save_resource_to_csv(self, filename='results/asymmetric/asymmetric_resources.csv'):
         """Save resource consumption results to CSV"""
@@ -901,10 +955,10 @@ class AsymmetricEncryptionAnalysis:
         print(f"✓ Performance chart saved to '{filename}'")
         plt.close()
     
-    def visualize_signatures(self, filename='results/asymmetric/asymmetric_signatures_chart.png'):
-        """Generate signature performance visualization"""
-        if not self.signature_results:
-            print("No signature data to visualize")
+    def visualize_ciphertext(self, filename='results/asymmetric/asymmetric_ciphertext_chart.png'):
+        """Generate ciphertext size visualization"""
+        if not self.ciphertext_results:
+            print("No ciphertext data to visualize")
             return
         
         # Create results directory if it doesn't exist
@@ -912,67 +966,74 @@ class AsymmetricEncryptionAnalysis:
         
         import pandas as pd
         
-        df = pd.DataFrame(self.signature_results)
+        df = pd.DataFrame(self.ciphertext_results)
         
         fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-        fig.suptitle('Asymmetric Digital Signature Performance Analysis', fontsize=16, fontweight='bold')
+        fig.suptitle('Ciphertext Size Analysis Across Algorithms', fontsize=16, fontweight='bold')
         
-        # Plot 1: Signature generation vs verification
-        x = np.arange(len(df))
-        width = 0.35
-        axes[0, 0].bar(x - width/2, df['avg_sig_gen_ms'], width, label='Generation', 
-                      color='orange', edgecolor='darkorange', linewidth=1.5)
-        axes[0, 0].bar(x + width/2, df['avg_sig_ver_ms'], width, label='Verification', 
-                      color='lightblue', edgecolor='blue', linewidth=1.5)
-        axes[0, 0].set_ylabel('Time (ms)', fontweight='bold')
-        axes[0, 0].set_title('Signature Generation vs Verification Time')
-        axes[0, 0].set_xticks(x)
-        axes[0, 0].set_xticklabels(df['algorithm'])
-        axes[0, 0].legend()
-        axes[0, 0].grid(True, alpha=0.3, axis='y')
+        # Plot 1: Ciphertext size vs message size for all algorithms
+        for algo in df['algorithm'].unique():
+            algo_data = df[df['algorithm'] == algo]
+            axes[0, 0].plot(algo_data['message_size_bytes'], algo_data['avg_ciphertext_bytes'], 
+                           marker='o', linewidth=2, markersize=6, label=algo)
         
-        # Plot 2: Signature size comparison
-        sorted_sig = df.sort_values('avg_signature_bytes')
-        axes[0, 1].barh(sorted_sig['algorithm'], sorted_sig['avg_signature_bytes'], 
-                       color='mediumseagreen', edgecolor='darkgreen', linewidth=1.5)
-        axes[0, 1].set_xlabel('Signature Size (bytes)', fontweight='bold')
-        axes[0, 1].set_title('Average Signature Size')
-        axes[0, 1].grid(True, alpha=0.3, axis='x')
+        axes[0, 0].set_xlabel('Message Size (bytes)', fontweight='bold')
+        axes[0, 0].set_ylabel('Ciphertext Size (bytes)', fontweight='bold')
+        axes[0, 0].set_title('Ciphertext Size vs Message Size')
+        axes[0, 0].legend(loc='best', fontsize=9)
+        axes[0, 0].grid(True, alpha=0.3)
         
-        for i, v in enumerate(sorted_sig['avg_signature_bytes'].values):
-            axes[0, 1].text(v + max(sorted_sig['avg_signature_bytes'])*0.02, i, f'{int(v)}B', 
-                           va='center', fontweight='bold')
+        # Plot 2: Expansion ratio comparison
+        # Get expansion ratio for a mid-size message (128 bytes)
+        mid_size_data = df[df['message_size_bytes'] == 128]
+        if len(mid_size_data) > 0:
+            sorted_ratio = mid_size_data.sort_values('expansion_ratio')
+            bars = axes[0, 1].barh(sorted_ratio['algorithm'], sorted_ratio['expansion_ratio'], 
+                           color='lightcoral', edgecolor='red', linewidth=1.5)
+            axes[0, 1].set_xlabel('Expansion Ratio (x)', fontweight='bold')
+            axes[0, 1].set_title('Expansion Ratio (128-byte message)')
+            axes[0, 1].grid(True, alpha=0.3, axis='x')
+            
+            for i, (bar, v) in enumerate(zip(bars, sorted_ratio['expansion_ratio'].values)):
+                axes[0, 1].text(v + max(sorted_ratio['expansion_ratio'])*0.02, i, f'{v:.2f}x', 
+                               va='center', fontweight='bold', fontsize=9)
         
-        # Plot 3: Generation/Verification ratio
-        sorted_ratio = df.sort_values('gen_ver_ratio', ascending=False)
-        axes[1, 0].barh(sorted_ratio['algorithm'], sorted_ratio['gen_ver_ratio'], 
-                       color='gold', edgecolor='darkgoldenrod', linewidth=1.5)
-        axes[1, 0].set_xlabel('Gen/Ver Time Ratio', fontweight='bold')
-        axes[1, 0].set_title('Signature Gen/Ver Time Ratio (Higher = Slower Generation)')
-        axes[1, 0].grid(True, alpha=0.3, axis='x')
+        # Plot 3: Overhead bytes comparison
+        for algo in df['algorithm'].unique():
+            algo_data = df[df['algorithm'] == algo]
+            axes[1, 0].plot(algo_data['message_size_bytes'], algo_data['overhead_bytes'], 
+                           marker='s', linewidth=2, markersize=6, label=algo)
         
-        for i, v in enumerate(sorted_ratio['gen_ver_ratio'].values):
-            axes[1, 0].text(v + max(sorted_ratio['gen_ver_ratio'])*0.02, i, f'{v:.2f}x', 
-                           va='center', fontweight='bold')
+        axes[1, 0].set_xlabel('Message Size (bytes)', fontweight='bold')
+        axes[1, 0].set_ylabel('Overhead (bytes)', fontweight='bold')
+        axes[1, 0].set_title('Encryption Overhead vs Message Size')
+        axes[1, 0].legend(loc='best', fontsize=9)
+        axes[1, 0].grid(True, alpha=0.3)
         
-        # Plot 4: Summary table
-        axes[1, 1].axis('off')
-        summary_text = "DIGITAL SIGNATURE SUMMARY\n" + "="*45 + "\n\n"
-        for _, row in df.iterrows():
-            summary_text += f"{row['algorithm']}\n"
-            summary_text += f"  Gen: {row['avg_sig_gen_ms']:.4f}ms\n"
-            summary_text += f"  Ver: {row['avg_sig_ver_ms']:.4f}ms\n"
-            summary_text += f"  Size: {int(row['avg_signature_bytes'])}B\n"
-            summary_text += f"  Ratio: {row['gen_ver_ratio']:.2f}x\n"
-            summary_text += "\n"
+        # Plot 4: Ciphertext size distribution at different message sizes
+        message_sizes_to_compare = [32, 128, 256]
+        available_sizes = [s for s in message_sizes_to_compare if s in df['message_size_bytes'].values]
         
-        axes[1, 1].text(0.05, 0.95, summary_text, transform=axes[1, 1].transAxes,
-                       fontsize=10, verticalalignment='top', fontfamily='monospace',
-                       bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        if available_sizes:
+            x = np.arange(len(df['algorithm'].unique()))
+            width = 0.25
+            
+            for idx, msg_size in enumerate(available_sizes):
+                size_data = df[df['message_size_bytes'] == msg_size]
+                offset = (idx - len(available_sizes)/2) * width + width/2
+                axes[1, 1].bar(x + offset, size_data['avg_ciphertext_bytes'], width, 
+                              label=f'{msg_size}B message', alpha=0.8)
+            
+            axes[1, 1].set_ylabel('Ciphertext Size (bytes)', fontweight='bold')
+            axes[1, 1].set_title('Ciphertext Size Comparison by Message Size')
+            axes[1, 1].set_xticks(x)
+            axes[1, 1].set_xticklabels(df['algorithm'].unique(), rotation=45, ha='right')
+            axes[1, 1].legend(fontsize=9)
+            axes[1, 1].grid(True, alpha=0.3, axis='y')
         
         plt.tight_layout()
         plt.savefig(filename, dpi=300, bbox_inches='tight')
-        print(f"✓ Signature chart saved to '{filename}'")
+        print(f"✓ Ciphertext chart saved to '{filename}'")
         plt.close()
     
     def visualize_resources(self, filename='results/asymmetric/asymmetric_resources_chart.png'):
@@ -1081,15 +1142,15 @@ class AsymmetricEncryptionAnalysis:
         
         self.test_key_generation()
         self.test_encryption_decryption()
-        self.test_digital_signatures()
+        self.test_ciphertext_sizes()
         self.test_resource_consumption()
         
         self.save_performance_to_csv()
-        self.save_signature_to_csv()
+        self.save_ciphertext_to_csv()
         self.save_resource_to_csv()
         
         self.visualize_performance()
-        self.visualize_signatures()
+        self.visualize_ciphertext()
         self.visualize_resources()
         
         print("\n" + "="*70)
@@ -1098,11 +1159,11 @@ class AsymmetricEncryptionAnalysis:
         print("\nGenerated Files (in 'results/asymmetric/' folder):")
         print("  CSV Files:")
         print("    - results/asymmetric/asymmetric_performance.csv")
-        print("    - results/asymmetric/asymmetric_signatures.csv")
+        print("    - results/asymmetric/asymmetric_ciphertext.csv")
         print("    - results/asymmetric/asymmetric_resources.csv")
         print("  Visualization Files:")
         print("    - results/asymmetric/asymmetric_performance_chart.png")
-        print("    - results/asymmetric/asymmetric_signatures_chart.png")
+        print("    - results/asymmetric/asymmetric_ciphertext_chart.png")
         print("    - results/asymmetric/asymmetric_resources_chart.png")
 
 

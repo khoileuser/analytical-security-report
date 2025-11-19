@@ -728,17 +728,42 @@ class AsymmetricEncryptionAnalysis:
         # Create results directory if it doesn't exist
         os.makedirs('results/asymmetric', exist_ok=True)
         
-        # Collect all unique field names from all results
-        all_keys = set()
+        # Merge rows with same algorithm by combining all their fields
+        merged_results = {}
         for result in self.performance_results:
+            algo = result['algorithm']
+            if algo not in merged_results:
+                merged_results[algo] = {}
+            # Merge all fields from this result into the algorithm's merged data
+            merged_results[algo].update(result)
+        
+        # Convert back to list and order columns logically
+        final_results = list(merged_results.values())
+        
+        # Define column order for better readability
+        column_order = ['algorithm', 'key_size_bits', 'iterations', 'message_size_bytes',
+                        'avg_gen_time_ms', 'std_dev_ms', 'avg_key_export_bytes',
+                        'avg_enc_time_ms', 'enc_speed_ops_per_sec',
+                        'avg_dec_time_ms', 'dec_speed_ops_per_sec',
+                        'avg_ciphertext_bytes']
+        
+        # Get all keys that actually exist in the data
+        all_keys = set()
+        for result in final_results:
             all_keys.update(result.keys())
         
+        # Use only the columns that exist, in the preferred order
+        fieldnames = [col for col in column_order if col in all_keys]
+        # Add any extra columns not in the preferred order
+        fieldnames.extend([col for col in sorted(all_keys) if col not in fieldnames])
+        
         with open(filename, 'w', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=sorted(all_keys))
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
-            writer.writerows(self.performance_results)
+            writer.writerows(final_results)
         
         print(f"\n✓ Performance results saved to '{filename}'")
+
     
     def save_signature_to_csv(self, filename='results/asymmetric/asymmetric_signatures.csv'):
         """Save signature results to CSV"""

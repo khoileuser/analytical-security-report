@@ -32,181 +32,6 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 import hashlib
 
-class ECIESEncryption:
-    """ECIES (Elliptic Curve Integrated Encryption Scheme) implementation"""
-    def __init__(self, private_key, public_key):
-        self.private_key = private_key
-        self.public_key = public_key
-        self.curve = private_key.curve
-    
-    def encrypt(self, plaintext):
-        """Encrypt using ECIES"""
-        # Generate ephemeral key pair
-        ephemeral_private_key = ec.generate_private_key(self.curve, default_backend())
-        ephemeral_public_key = ephemeral_private_key.public_key()
-        
-        # Perform ECDH to get shared secret
-        shared_key = ephemeral_private_key.exchange(ec.ECDH(), self.public_key)
-        
-        # Derive encryption and MAC keys using HKDF
-        derived_keys = HKDF(
-            algorithm=hashes.SHA256(),
-            length=64,  # 32 bytes for AES key + 32 bytes for MAC key
-            salt=None,
-            info=b'ecies-encryption',
-            backend=default_backend()
-        ).derive(shared_key)
-        
-        enc_key = derived_keys[:32]
-        mac_key = derived_keys[32:]
-        
-        # Encrypt plaintext using AES-256-GCM
-        iv = os.urandom(12)  # GCM standard nonce size
-        cipher = Cipher(
-            algorithms.AES(enc_key),
-            modes.GCM(iv),
-            backend=default_backend()
-        )
-        encryptor = cipher.encryptor()
-        ciphertext = encryptor.update(plaintext) + encryptor.finalize()
-        
-        # Serialize ephemeral public key
-        ephemeral_public_bytes = ephemeral_public_key.public_bytes(
-            encoding=serialization.Encoding.X962,
-            format=serialization.PublicFormat.UncompressedPoint
-        )
-        
-        # Return ephemeral public key + iv + ciphertext + auth tag
-        return ephemeral_public_bytes + iv + ciphertext + encryptor.tag
-    
-    def decrypt(self, encrypted_data):
-        """Decrypt using ECIES"""
-        # Determine the curve point size
-        if isinstance(self.curve, ec.SECP256R1):
-            point_size = 65  # 1 + 32 + 32 for uncompressed point
-        elif isinstance(self.curve, ec.SECP384R1):
-            point_size = 97  # 1 + 48 + 48 for uncompressed point
-        else:
-            raise ValueError("Unsupported curve")
-        
-        # Extract components
-        ephemeral_public_bytes = encrypted_data[:point_size]
-        iv = encrypted_data[point_size:point_size + 12]
-        ciphertext_and_tag = encrypted_data[point_size + 12:]
-        auth_tag = ciphertext_and_tag[-16:]  # GCM tag is 16 bytes
-        ciphertext = ciphertext_and_tag[:-16]
-        
-        # Reconstruct ephemeral public key
-        ephemeral_public_key = ec.EllipticCurvePublicKey.from_encoded_point(
-            self.curve, ephemeral_public_bytes
-        )
-        
-        # Perform ECDH to get shared secret
-        shared_key = self.private_key.exchange(ec.ECDH(), ephemeral_public_key)
-        
-        # Derive encryption and MAC keys using HKDF
-        derived_keys = HKDF(
-            algorithm=hashes.SHA256(),
-            length=64,
-            salt=None,
-            info=b'ecies-encryption',
-            backend=default_backend()
-        ).derive(shared_key)
-        
-        enc_key = derived_keys[:32]
-        
-        # Decrypt ciphertext using AES-256-GCM
-        cipher = Cipher(
-            algorithms.AES(enc_key),
-            modes.GCM(iv, auth_tag),
-            backend=default_backend()
-        )
-        decryptor = cipher.decryptor()
-        plaintext = decryptor.update(ciphertext) + decryptor.finalize()
-        
-        return plaintext
-
-class ElGamalSimulator:
-    """Simulated ElGamal for performance testing (not cryptographically secure)"""
-    def __init__(self, key_size):
-        self.key_size = key_size
-        # Use random bits instead of prime generation for speed
-        self.p = random.getrandbits(key_size) | 1  # Make it odd
-        self.g = random.randint(2, min(65537, self.p - 1))
-        self.x = random.randint(1, self.p - 2)  # private key
-        self.y = pow(self.g, self.x, self.p)  # public key
-    
-    def encrypt(self, message):
-        """Simulate ElGamal encryption"""
-        k = random.randint(1, self.p - 2)
-        c1 = pow(self.g, k, self.p)
-        # Convert message to int
-        m_int = int.from_bytes(message, byteorder='big')
-        if m_int >= self.p:
-            # Hash if message is too large
-            m_int = int.from_bytes(hashlib.sha256(message).digest()[:self.key_size//8], byteorder='big')
-        c2 = (m_int * pow(self.y, k, self.p)) % self.p
-        return (c1, c2)
-    
-    def decrypt(self, ciphertext):
-        """Simulate ElGamal decryption"""
-        c1, c2 = ciphertext
-        s = pow(c1, self.x, self.p)
-        s_inv = pow(s, self.p - 2, self.p)
-        m_int = (c2 * s_inv) % self.p
-        byte_length = (m_int.bit_length() + 7) // 8
-        return m_int.to_bytes(byte_length, byteorder='big') if byte_length > 0 else b'\x00'
-    
-    def sign(self, message):
-        """Simulate ElGamal signature"""
-        h = hashlib.sha256(message).digest()
-        m_int = int.from_bytes(h, byteorder='big') % (self.p - 1)
-        k = random.randint(2, self.p - 2)
-        while self._gcd(k, self.p - 1) != 1:
-            k = random.randint(2, self.p - 2)
-        r = pow(self.g, k, self.p)
-        k_inv = self._modinv(k, self.p - 1)
-        s = (k_inv * (m_int - self.x * r)) % (self.p - 1)
-        return (r, s)
-    
-    def verify(self, message, signature):
-        """Simulate ElGamal signature verification"""
-        r, s = signature
-        if not (0 < r < self.p):
-            return False
-        h = hashlib.sha256(message).digest()
-        m_int = int.from_bytes(h, byteorder='big') % (self.p - 1)
-        v1 = pow(self.y, r, self.p) * pow(r, s, self.p) % self.p
-        v2 = pow(self.g, m_int, self.p)
-        return v1 == v2
-    
-    def exportKey(self):
-        """Export key for size measurement"""
-        return str((self.p, self.g, self.y, self.x)).encode()
-    
-    @staticmethod
-    def _gcd(a, b):
-        while b:
-            a, b = b, a % b
-        return a
-    
-    @staticmethod
-    def _modinv(a, m):
-        """Iterative modular multiplicative inverse using extended Euclidean algorithm"""
-        if m == 1:
-            return 0
-        
-        m0, x0, x1 = m, 0, 1
-        
-        while a > 1:
-            if m == 0:
-                return None  # No inverse exists
-            q = a // m
-            a, m = m, a % m
-            x0, x1 = x1 - q * x0, x0
-        
-        return (x1 % m0 + m0) % m0 if a == 1 else None
-
 class AsymmetricEncryptionAnalysis:
     """Comprehensive asymmetric encryption analysis with performance measurement"""
     
@@ -1166,6 +991,180 @@ class AsymmetricEncryptionAnalysis:
         print("    - results/asymmetric/asymmetric_ciphertext_chart.png")
         print("    - results/asymmetric/asymmetric_resources_chart.png")
 
+class ECIESEncryption:
+    """ECIES (Elliptic Curve Integrated Encryption Scheme) implementation"""
+    def __init__(self, private_key, public_key):
+        self.private_key = private_key
+        self.public_key = public_key
+        self.curve = private_key.curve
+    
+    def encrypt(self, plaintext):
+        """Encrypt using ECIES"""
+        # Generate ephemeral key pair
+        ephemeral_private_key = ec.generate_private_key(self.curve, default_backend())
+        ephemeral_public_key = ephemeral_private_key.public_key()
+        
+        # Perform ECDH to get shared secret
+        shared_key = ephemeral_private_key.exchange(ec.ECDH(), self.public_key)
+        
+        # Derive encryption and MAC keys using HKDF
+        derived_keys = HKDF(
+            algorithm=hashes.SHA256(),
+            length=64,  # 32 bytes for AES key + 32 bytes for MAC key
+            salt=None,
+            info=b'ecies-encryption',
+            backend=default_backend()
+        ).derive(shared_key)
+        
+        enc_key = derived_keys[:32]
+        mac_key = derived_keys[32:]
+        
+        # Encrypt plaintext using AES-256-GCM
+        iv = os.urandom(12)  # GCM standard nonce size
+        cipher = Cipher(
+            algorithms.AES(enc_key),
+            modes.GCM(iv),
+            backend=default_backend()
+        )
+        encryptor = cipher.encryptor()
+        ciphertext = encryptor.update(plaintext) + encryptor.finalize()
+        
+        # Serialize ephemeral public key
+        ephemeral_public_bytes = ephemeral_public_key.public_bytes(
+            encoding=serialization.Encoding.X962,
+            format=serialization.PublicFormat.UncompressedPoint
+        )
+        
+        # Return ephemeral public key + iv + ciphertext + auth tag
+        return ephemeral_public_bytes + iv + ciphertext + encryptor.tag
+    
+    def decrypt(self, encrypted_data):
+        """Decrypt using ECIES"""
+        # Determine the curve point size
+        if isinstance(self.curve, ec.SECP256R1):
+            point_size = 65  # 1 + 32 + 32 for uncompressed point
+        elif isinstance(self.curve, ec.SECP384R1):
+            point_size = 97  # 1 + 48 + 48 for uncompressed point
+        else:
+            raise ValueError("Unsupported curve")
+        
+        # Extract components
+        ephemeral_public_bytes = encrypted_data[:point_size]
+        iv = encrypted_data[point_size:point_size + 12]
+        ciphertext_and_tag = encrypted_data[point_size + 12:]
+        auth_tag = ciphertext_and_tag[-16:]  # GCM tag is 16 bytes
+        ciphertext = ciphertext_and_tag[:-16]
+        
+        # Reconstruct ephemeral public key
+        ephemeral_public_key = ec.EllipticCurvePublicKey.from_encoded_point(
+            self.curve, ephemeral_public_bytes
+        )
+        
+        # Perform ECDH to get shared secret
+        shared_key = self.private_key.exchange(ec.ECDH(), ephemeral_public_key)
+        
+        # Derive encryption and MAC keys using HKDF
+        derived_keys = HKDF(
+            algorithm=hashes.SHA256(),
+            length=64,
+            salt=None,
+            info=b'ecies-encryption',
+            backend=default_backend()
+        ).derive(shared_key)
+        
+        enc_key = derived_keys[:32]
+        
+        # Decrypt ciphertext using AES-256-GCM
+        cipher = Cipher(
+            algorithms.AES(enc_key),
+            modes.GCM(iv, auth_tag),
+            backend=default_backend()
+        )
+        decryptor = cipher.decryptor()
+        plaintext = decryptor.update(ciphertext) + decryptor.finalize()
+        
+        return plaintext
+
+class ElGamalSimulator:
+    """Simulated ElGamal for performance testing (not cryptographically secure)"""
+    def __init__(self, key_size):
+        self.key_size = key_size
+        # Use random bits instead of prime generation for speed
+        self.p = random.getrandbits(key_size) | 1  # Make it odd
+        self.g = random.randint(2, min(65537, self.p - 1))
+        self.x = random.randint(1, self.p - 2)  # private key
+        self.y = pow(self.g, self.x, self.p)  # public key
+    
+    def encrypt(self, message):
+        """Simulate ElGamal encryption"""
+        k = random.randint(1, self.p - 2)
+        c1 = pow(self.g, k, self.p)
+        # Convert message to int
+        m_int = int.from_bytes(message, byteorder='big')
+        if m_int >= self.p:
+            # Hash if message is too large
+            m_int = int.from_bytes(hashlib.sha256(message).digest()[:self.key_size//8], byteorder='big')
+        c2 = (m_int * pow(self.y, k, self.p)) % self.p
+        return (c1, c2)
+    
+    def decrypt(self, ciphertext):
+        """Simulate ElGamal decryption"""
+        c1, c2 = ciphertext
+        s = pow(c1, self.x, self.p)
+        s_inv = pow(s, self.p - 2, self.p)
+        m_int = (c2 * s_inv) % self.p
+        byte_length = (m_int.bit_length() + 7) // 8
+        return m_int.to_bytes(byte_length, byteorder='big') if byte_length > 0 else b'\x00'
+    
+    def sign(self, message):
+        """Simulate ElGamal signature"""
+        h = hashlib.sha256(message).digest()
+        m_int = int.from_bytes(h, byteorder='big') % (self.p - 1)
+        k = random.randint(2, self.p - 2)
+        while self._gcd(k, self.p - 1) != 1:
+            k = random.randint(2, self.p - 2)
+        r = pow(self.g, k, self.p)
+        k_inv = self._modinv(k, self.p - 1)
+        s = (k_inv * (m_int - self.x * r)) % (self.p - 1)
+        return (r, s)
+    
+    def verify(self, message, signature):
+        """Simulate ElGamal signature verification"""
+        r, s = signature
+        if not (0 < r < self.p):
+            return False
+        h = hashlib.sha256(message).digest()
+        m_int = int.from_bytes(h, byteorder='big') % (self.p - 1)
+        v1 = pow(self.y, r, self.p) * pow(r, s, self.p) % self.p
+        v2 = pow(self.g, m_int, self.p)
+        return v1 == v2
+    
+    def exportKey(self):
+        """Export key for size measurement"""
+        return str((self.p, self.g, self.y, self.x)).encode()
+    
+    @staticmethod
+    def _gcd(a, b):
+        while b:
+            a, b = b, a % b
+        return a
+    
+    @staticmethod
+    def _modinv(a, m):
+        """Iterative modular multiplicative inverse using extended Euclidean algorithm"""
+        if m == 1:
+            return 0
+        
+        m0, x0, x1 = m, 0, 1
+        
+        while a > 1:
+            if m == 0:
+                return None  # No inverse exists
+            q = a // m
+            a, m = m, a % m
+            x0, x1 = x1 - q * x0, x0
+        
+        return (x1 % m0 + m0) % m0 if a == 1 else None
 
 if __name__ == "__main__":
     analysis = AsymmetricEncryptionAnalysis()

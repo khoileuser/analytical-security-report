@@ -80,7 +80,7 @@ pip install -r requirements.txt
 **Running the Script:**
 
 ```bash
-python hashing_analysis.py
+python src/hashing_analysis.py
 ```
 
 Expected output will display test progress and file generation confirmations.
@@ -133,7 +133,7 @@ Expected output will display test progress and file generation confirmations.
 **Running the Script:**
 
 ```bash
-python symmetric_analysis.py
+python src/symmetric_analysis.py
 ```
 
 Expected runtime: 5-15 minutes depending on system performance.
@@ -193,7 +193,7 @@ Expected runtime: 5-15 minutes depending on system performance.
 **Running the Script:**
 
 ```bash
-python asymmetric_analysis.py
+python src/asymmetric_analysis.py
 ```
 
 Expected runtime: 15-45 minutes depending on system performance (RSA key generation is computationally intensive).
@@ -207,9 +207,9 @@ Expected runtime: 15-45 minutes depending on system performance (RSA key generat
 Run scripts one after another:
 
 ```bash
-python hashing_analysis.py
-python symmetric_analysis.py
-python asymmetric_analysis.py
+python src/hashing_analysis.py
+python src/symmetric_analysis.py
+python src/asymmetric_analysis.py
 ```
 
 ### Batch Execution Script
